@@ -1,0 +1,2 @@
+Kaynak görseller: Google MediaPipe test varlıkları (https://storage.googleapis.com/mediapipe-assets/).
+portrait.jpg: ABD Başkanlık resmi portresi (kamu malı). Yalnızca algılayıcıyı test etmek için kullanılır.

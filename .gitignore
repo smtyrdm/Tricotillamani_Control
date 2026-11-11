@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+build/
+dist/
+*.spec
+ayarlar.json
+kayitlar.csv
+sonuc.jpg
+.pytest_cache/
+hata_kaydi.txt
