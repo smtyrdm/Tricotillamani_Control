@@ -4,7 +4,10 @@ Bıyık bölgesi + parmak ucu algılayıcı.
 Mantık:
   1. MediaPipe Face Landmarker ile yüzün 478 noktası bulunur.
   2. Burun altı (subnazal) ile üst dudak arasındaki noktalardan bir "bıyık bölgesi"
-     çokgeni oluşturulur. Bu bölge yalnızca bıyığı kapsar; yanak, alın, çene vb. hariçtir.
+     çokgeni oluşturulur (gür bıyığı kapsaması için yüz eksenlerinde büyütülür).
+     Bu bölge yalnızca bıyığı kapsar; yanak, alın, çene vb. hariçtir.
+  2b. Sahte el elemesi: avucu çok küçük olan veya bileği yüzün içinde ve dudak
+     üstünde kalan "eller" (yanak, kulak, burun yanlış algılamaları) yok sayılır.
   3. MediaPipe Hand Landmarker ile ellerin 21 noktası bulunur.
   4. Başparmak / işaret / orta parmak uçlarından biri bıyık bölgesine (küçük bir pay ile)
      girerse "TEMAS" sayılır. Başparmak ile işaret parmağı birbirine yakın (çimdik) ve
@@ -32,7 +35,10 @@ NOSE_EXTRA = [2, 98, 327, 97, 326]
 MUSTACHE_IDX = UPPER_LIP + NOSE_BASE + NOSE_EXTRA
 
 FACE_LEFT, FACE_RIGHT = 234, 454  # yüz genişliği için
-CHIN, FOREHEAD = 152, 10
+CHIN, FOREHEAD, NOSE_TIP, LIP_TOP = 152, 10, 1, 0
+FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378,
+             400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21,
+             54, 103, 67, 109]
 
 # Kontrol edilen parmak uçları
 THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP = 4, 8, 12, 16, 20
@@ -58,6 +64,24 @@ class DetectionResult:
     min_distance: float = float("inf")  # parmak ucunun bölgeye uzaklığı (yüz genişliği oranı)
     occlusion: float = 0.0  # bıyık bölgesinin ne kadarının örtüldüğü (0-1)
     occluded_touch: bool = False  # temas, örtülme yedek kontrolüyle mi bulundu
+    yaw: float = 0.0  # baş dönüklüğü: 0 = tam karşı, 1 = tam profil
+    rejected_hands: List[np.ndarray] = field(default_factory=list)  # sahte el (yanak/kulak vb.)
+
+
+@dataclass
+class FaceGeom:
+    zone: np.ndarray
+    fw: float
+    oval: np.ndarray        # içe doğru küçültülmüş yüz ovali
+    oval_big: np.ndarray    # kulakları da kapsayan büyütülmüş yüz ovali
+    up: np.ndarray          # yüzün yukarı yön vektörü (çeneden alına)
+    lip: np.ndarray         # üst dudak noktası
+    anchors: np.ndarray     # örtülme yaması için 3 nokta
+    yaw_ratio: float        # burun ucunun iki yüz kenarı arasındaki konumu (0.5 = karşı)
+
+    @property
+    def yaw(self) -> float:
+        return min(1.0, abs(self.yaw_ratio - 0.5) * 2)
 
 
 PATCH_W, PATCH_H = 64, 24
@@ -80,12 +104,68 @@ def _to_px(landmarks, w: int, h: int, idx=None) -> np.ndarray:
     return np.array([(landmarks[i].x * w, landmarks[i].y * h) for i in idx], dtype=np.float32)
 
 
-def mustache_zone(face_px: np.ndarray) -> Tuple[np.ndarray, float]:
+def _scale_poly(poly: np.ndarray, center: np.ndarray, xaxis: np.ndarray, sx: float, sy: float):
+    """Çokgeni yüz eksenlerine göre (yatay sx, dikey sy) merkezden büyütür."""
+    yaxis = np.array([-xaxis[1], xaxis[0]], np.float32)
+    rel = poly - center
+    a, b = rel @ xaxis, rel @ yaxis
+    return (center + np.outer(a * sx, xaxis) + np.outer(b * sy, yaxis)).astype(np.float32)
+
+
+def mustache_zone(face_px: np.ndarray, scale_x: float = 1.0,
+                  scale_y: float = 1.0) -> Tuple[np.ndarray, float]:
     """Yüz noktalarından bıyık bölgesi (dışbükey zarf) ve yüz genişliğini döndürür."""
     pts = face_px[MUSTACHE_IDX]
     hull = cv2.convexHull(pts.astype(np.float32)).reshape(-1, 2)
     fw = float(np.linalg.norm(face_px[FACE_LEFT] - face_px[FACE_RIGHT]))
+    if scale_x != 1.0 or scale_y != 1.0:
+        xaxis = face_px[FACE_RIGHT] - face_px[FACE_LEFT]
+        xaxis = xaxis / (np.linalg.norm(xaxis) + 1e-6)
+        hull = _scale_poly(hull, hull.mean(axis=0), xaxis, scale_x, scale_y)
     return hull, max(fw, 1.0)
+
+
+def face_geometry(face_px: np.ndarray, scale_x: float, scale_y: float) -> FaceGeom:
+    zone, fw = mustache_zone(face_px, scale_x, scale_y)
+    oval0 = face_px[FACE_OVAL]
+    c = oval0.mean(axis=0)
+    oval = (c + (oval0 - c) * 0.85).astype(np.float32)
+    oval_big = _scale_poly(oval0, c, (face_px[FACE_RIGHT] - face_px[FACE_LEFT]) /
+                           (np.linalg.norm(face_px[FACE_RIGHT] - face_px[FACE_LEFT]) + 1e-6), 1.25, 1.05)
+    up = face_px[FOREHEAD] - face_px[CHIN]
+    up = up / (np.linalg.norm(up) + 1e-6)
+    xaxis = face_px[FACE_RIGHT] - face_px[FACE_LEFT]
+    span = float(np.dot(xaxis, xaxis)) + 1e-6
+    yaw_ratio = float(np.dot(face_px[NOSE_TIP] - face_px[FACE_LEFT], xaxis) / span)
+    return FaceGeom(zone=zone, fw=fw, oval=oval, oval_big=oval_big, up=up.astype(np.float32),
+                    lip=face_px[LIP_TOP].copy(), anchors=face_px[PATCH_ANCHORS].copy(),
+                    yaw_ratio=yaw_ratio)
+
+
+def hand_is_plausible(hand: np.ndarray, g: FaceGeom, min_palm: float = 0.28) -> bool:
+    """
+    Sahte el elemesi. Model bazen yanak, kulak veya burnu küçük bir el sanar.
+      - Yüzün/kulağın üzerinde duran gerçek bir elin avucu (bilek -> orta parmak kökü)
+        yüz genişliğinin en az ~%30'u kadardır. Yüz üstünde bundan küçük "el" sahtedir.
+      - Bileği yüzün İÇİNDE ve üst dudaktan YUKARIDA olan bir el gerçekçi değildir
+        (bıyığa uzanan elin bileği çenenin altında veya yüzün yanında olur).
+    """
+    palm = float(np.linalg.norm(hand[0] - hand[9])) / g.fw
+    if g.yaw > 0.6:  # baş belirgin şekilde yana dönükken daha sıkı ol
+        min_palm *= 1.25
+    if palm > 3.0:
+        return False
+    center = hand.mean(axis=0)
+    on_face = cv2.pointPolygonTest(g.oval_big.reshape(-1, 1, 2),
+                                   (float(center[0]), float(center[1])), False) > 0
+    if on_face and palm < min_palm:
+        return False
+    wrist = hand[0]
+    inside = cv2.pointPolygonTest(g.oval.reshape(-1, 1, 2), (float(wrist[0]), float(wrist[1])), False) > 0
+    above_lip = float(np.dot(wrist - g.lip, g.up)) > 0.05 * g.fw
+    if inside and above_lip:
+        return False
+    return True
 
 
 def classify(zone: np.ndarray, face_width: float, hands_px: List[np.ndarray],
@@ -131,7 +211,8 @@ class MustacheDetector:
     def __init__(self, video_mode: bool = True, zone_memory_s: float = 3.0,
                  margin: float = 0.07, near_margin: float = 0.25, pinch_ratio: float = 0.22,
                  crop_scale: float = 2.4, occlusion_check: bool = True,
-                 occlusion_threshold: float = 0.40):
+                 occlusion_threshold: float = 0.40, zone_scale_x: float = 1.25,
+                 zone_scale_y: float = 1.45, min_palm: float = 0.28):
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions, vision
 
@@ -141,32 +222,34 @@ class MustacheDetector:
         self.face = vision.FaceLandmarker.create_from_options(vision.FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path("face_landmarker.task")),
             running_mode=mode, num_faces=1,
-            min_face_detection_confidence=0.4, min_face_presence_confidence=0.4,
-            min_tracking_confidence=0.4))
+            min_face_detection_confidence=0.5, min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5))
+        # Not: takip eşiği düşük olursa model bir kez yanağı/kulağı el sanınca onu
+        # takip etmeye devam ediyordu; bu yüzden eşikler 0.5+.
         self.hand = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path("hand_landmarker.task")),
             running_mode=mode, num_hands=2,
-            min_hand_detection_confidence=0.35, min_hand_presence_confidence=0.35,
-            min_tracking_confidence=0.35))
+            min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.6,
+            min_tracking_confidence=0.6))
         # Yüz çevresine yakınlaştırılmış ikinci el algılayıcı: yüze yakın / yüzü örten
         # elleri (yumruk, çimdik) tam karede kaçırmamak için.
         self.hand_crop = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path("hand_landmarker.task")),
             running_mode=vision.RunningMode.IMAGE, num_hands=2,
-            min_hand_detection_confidence=0.3, min_hand_presence_confidence=0.3))
+            min_hand_detection_confidence=0.5, min_hand_presence_confidence=0.6))
         self.crop_scale = crop_scale
         self.zone_memory_s = zone_memory_s
         self.margin = margin
         self.near_margin = near_margin
         self.pinch_ratio = pinch_ratio
+        self.zone_scale_x = zone_scale_x
+        self.zone_scale_y = zone_scale_y
+        self.min_palm = min_palm
         self.occlusion_check = occlusion_check
         self.occlusion_threshold = occlusion_threshold
-        self._baseline: Optional[np.ndarray] = None
-        self._baseline_n = 0
-        self._last_anchors: Optional[np.ndarray] = None
-        self._last_zone: Optional[np.ndarray] = None
-        self._last_fw = 0.0
-        self._last_zone_t = 0.0
+        self._baselines = {}  # baş açısına göre (yaw dilimi) elsiz bıyık görüntüleri
+        self._geom: Optional[FaceGeom] = None
+        self._geom_t = 0.0
         self._t0 = time.monotonic()
         self._last_ts = -1
 
@@ -177,6 +260,9 @@ class MustacheDetector:
             self.hand_crop.close()
         except Exception:
             pass
+
+    def reset_baseline(self):
+        self._baselines = {}
 
     def process(self, frame_bgr: np.ndarray, now: Optional[float] = None) -> DetectionResult:
         now = time.monotonic() if now is None else now
@@ -195,66 +281,66 @@ class MustacheDetector:
             hr = self.hand.detect(image)
 
         res = DetectionResult()
+        geom = None
         if fr.face_landmarks:
             face_px = _to_px(fr.face_landmarks[0], w, h)
-            zone, fw = mustache_zone(face_px)
-            self._last_zone, self._last_fw, self._last_zone_t = zone, fw, now
-            self._last_anchors = face_px[PATCH_ANCHORS]
+            geom = face_geometry(face_px, self.zone_scale_x, self.zone_scale_y)
+            self._geom, self._geom_t = geom, now
             res.face_found = True
-        elif self._last_zone is not None and now - self._last_zone_t <= self.zone_memory_s:
-            zone, fw = self._last_zone, self._last_fw
+        elif self._geom is not None and now - self._geom_t <= self.zone_memory_s:
+            geom = self._geom
             res.face_from_memory = True
-        else:
-            zone, fw = None, 0.0
 
-        res.hand_points = [_to_px(hl, w, h) for hl in hr.hand_landmarks]
-        if zone is not None and self.crop_scale:
-            res.hand_points += self._crop_hands(rgb, zone, fw, res.hand_points)
+        hands = [_to_px(hl, w, h) for hl in hr.hand_landmarks]
+        if geom is not None and self.crop_scale:
+            hands += self._crop_hands(rgb, geom.zone, geom.fw, hands)
+        if geom is not None:
+            res.zone, res.face_width, res.yaw = geom.zone, geom.fw, geom.yaw
+            for hp in hands:
+                (res.hand_points if hand_is_plausible(hp, geom, self.min_palm)
+                 else res.rejected_hands).append(hp)
+        else:
+            res.hand_points = hands
         res.hands = len(res.hand_points)
-        res.zone, res.face_width = zone, fw
-        if zone is not None and res.hand_points:
+        if geom is not None and res.hand_points:
             res.state, res.hit_points, res.min_distance = classify(
-                zone, fw, res.hand_points, self.margin, self.near_margin, self.pinch_ratio)
-        if zone is not None and self.occlusion_check:
-            self._occlusion_fallback(rgb, res)
+                geom.zone, geom.fw, res.hand_points, self.margin, self.near_margin, self.pinch_ratio)
+        if geom is not None and self.occlusion_check:
+            self._occlusion_fallback(rgb, res, geom)
         return res
 
-    def reset_baseline(self):
-        self._baseline, self._baseline_n = None, 0
-
-    def _occlusion_fallback(self, rgb, res: DetectionResult):
+    def _occlusion_fallback(self, rgb, res: DetectionResult, g: FaceGeom):
         """
-        Yedek kontrol: el bıyığın hemen yanındaysa ve bıyık bölgesinin görüntüsü
-        (elsiz haldeki öğrenilmiş görüntüsüne göre) belirgin şekilde değiştiyse,
-        parmak uçları doğru bulunamamış olsa bile TEMAS say.
+        Yedek kontrol: (gerçek olduğu doğrulanmış) bir el bıyığın hemen yanındaysa ve bıyık
+        bölgesinin görüntüsü, AYNI baş açısındaki elsiz görüntüsüne göre belirgin şekilde
+        değiştiyse, parmak uçları doğru bulunamamış olsa bile TEMAS say.
+        Baş belirgin şekilde yana dönükken bu kontrol yapılmaz (yanlış alarm riskini önler).
         """
-        zone, fw = res.zone, res.face_width
-        contour = zone.reshape(-1, 1, 2).astype(np.float32)
+        contour = g.zone.reshape(-1, 1, 2).astype(np.float32)
         hand_d = float("inf")
         for hp in res.hand_points:
             for p in hp:
-                d = -cv2.pointPolygonTest(contour, (float(p[0]), float(p[1])), True) / fw
+                d = -cv2.pointPolygonTest(contour, (float(p[0]), float(p[1])), True) / g.fw
                 hand_d = min(hand_d, d)
-        if self._last_anchors is None:
+        if g.yaw > 0.5:
             return
-        patch = mustache_patch(rgb, self._last_anchors)
-        hand_far = hand_d > 1.0
-        if res.face_found and hand_far:
+        patch = mustache_patch(rgb, g.anchors)
+        key = int(np.clip(g.yaw_ratio, 0, 0.999) * 8)  # baş açısı dilimi
+        if res.face_found and hand_d > 1.0 and not res.rejected_hands:
             # Elsiz görüntüyü öğren (ışık değişimine uyum için yavaşça güncellenir)
-            if self._baseline is None:
-                self._baseline = patch.copy()
-            else:
-                self._baseline = 0.9 * self._baseline + 0.1 * patch
-            self._baseline_n += 1
+            base, n = self._baselines.get(key, (None, 0))
+            base = patch.copy() if base is None else 0.9 * base + 0.1 * patch
+            self._baselines[key] = (base, n + 1)
             return
         if hand_d > 0.5:
             return
         if res.face_from_memory and hand_d <= 0.3 and res.state not in (STATE_TOUCH, STATE_PULL):
             # El bıyık bölgesinin yanındayken yüz kayboldu: büyük ihtimalle el yüzü örtüyor
             res.state, res.occluded_touch = STATE_TOUCH, True
-        if self._baseline is None or self._baseline_n < 5:
+        base, n = self._baselines.get(key, (None, 0))
+        if base is None or n < 5:
             return
-        changed = (np.linalg.norm(patch - self._baseline, axis=2) > 15.0).astype(np.float32)
+        changed = (np.linalg.norm(patch - base, axis=2) > 15.0).astype(np.float32)
         # Yerel örtülme: bıyık yamasında parmak genişliğinde (~10 sütun) en çok değişen şerit
         cols = changed.mean(axis=0)
         res.occlusion = float(np.convolve(cols, np.ones(10) / 10, mode="valid").max())
@@ -300,6 +386,9 @@ def draw(frame: np.ndarray, res: DetectionResult, label: bool = True) -> np.ndar
             cv2.line(out, tuple(hp[a].astype(int)), tuple(hp[b].astype(int)), (255, 255, 0), 2)
         for t in (THUMB_TIP, INDEX_TIP, MIDDLE_TIP):
             cv2.circle(out, tuple(hp[t].astype(int)), 5, (255, 0, 0), -1)
+    for hp in res.rejected_hands:  # sahte diye elenen eller (gri)
+        for a, b in HAND_CONNECTIONS:
+            cv2.line(out, tuple(hp[a].astype(int)), tuple(hp[b].astype(int)), (128, 128, 128), 1)
     for p in res.hit_points:
         cv2.circle(out, p, 10, (0, 0, 255), 3)
     if label:

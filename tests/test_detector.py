@@ -146,3 +146,90 @@ if __name__ == "__main__":
     test_alarm_timing()
     test_video_sequence()
     print("Geometri, alarm zamanlama ve video dizisi testleri: GEÇTİ")
+
+
+# ---------------------------------------------------------------- kullanıcı geri bildirimi
+def _portrait_geom():
+    import mediapipe as mp
+    from trikokontrol.detector import _to_px, face_geometry
+    det = MustacheDetector(video_mode=False)
+    img = cv2.imread(os.path.join(IN, "neg_01_el_yok.jpg"))
+    fr = det.face.detect(mp.Image(image_format=mp.ImageFormat.SRGB,
+                                  data=cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+    det.close()
+    face_px = _to_px(fr.face_landmarks[0], img.shape[1], img.shape[0])
+    return face_px, face_geometry(face_px, 1.25, 1.45)
+
+
+def _fake_hand(wrist, tip, palm_len):
+    """Bilekten parmak ucuna uzanan basit bir el iskeleti üretir."""
+    wrist, tip = np.array(wrist, np.float32), np.array(tip, np.float32)
+    d = (tip - wrist) / (np.linalg.norm(tip - wrist) + 1e-6)
+    n = np.array([-d[1], d[0]], np.float32)
+    h = np.zeros((21, 2), np.float32)
+    h[0] = wrist
+    for f, off in zip(range(5), (-0.45, -0.2, 0.0, 0.2, 0.4)):
+        base = wrist + d * palm_len + n * off * palm_len
+        for j in range(1, 5):
+            idx = 1 + f * 4 + (j - 1)
+            h[idx] = base + (tip - base) * (j / 4) if f == 1 else base + d * palm_len * 0.25 * j
+    h[9] = wrist + d * palm_len
+    return h
+
+
+def test_phantom_hands_rejected():
+    """Ekran görüntüsündeki hata: elin yokken yanak / kulak 'el' sanılıp alarm veriyordu."""
+    from trikokontrol.detector import FACE_LEFT, hand_is_plausible
+    face_px, g = _portrait_geom()
+    fw = g.fw
+    nose = face_px[1]
+    # 1) yanakta küçük hayali el: bilek yanakta (dudak üstü), parmaklar burun/bıyık yanında
+    cheek = face_px[205]
+    phantom = _fake_hand(cheek, (nose[0], nose[1] + fw * 0.12), fw * 0.18)
+    assert not hand_is_plausible(phantom, g)
+    # 2) kulakta küçük hayali el
+    ear = face_px[FACE_LEFT] + np.array([-fw * 0.05, 0], np.float32)
+    phantom_ear = _fake_hand(ear + [0, fw * 0.15], ear, fw * 0.12)
+    assert not hand_is_plausible(phantom_ear, g)
+    # 3) gerçek el: aşağıdan gelip bıyığa dokunuyor -> kabul
+    lip = face_px[0]
+    real = _fake_hand(lip + [0, fw * 1.0], lip + [0, -fw * 0.05], fw * 0.55)
+    assert hand_is_plausible(real, g)
+    # 4) gerçek el: yandan gelip bıyığa dokunuyor -> kabul
+    real_side = _fake_hand(face_px[61] + [-fw * 0.9, fw * 0.3], face_px[61], fw * 0.5)
+    assert hand_is_plausible(real_side, g)
+    # sınıflandırmada da hayali el alarm üretmemeli
+    st = classify(g.zone, fw, [real])[0]
+    assert st in (STATE_TOUCH, STATE_PULL)
+
+
+def test_head_turn_no_occlusion_alarm():
+    """Baş yana dönükken örtülme kontrolü (görüntü değişimi) alarm üretmemeli."""
+    det = MustacheDetector(video_mode=False)
+    clean = cv2.imread(os.path.join(IN, "neg_01_el_yok.jpg"))
+    for _ in range(8):
+        det.process(clean)
+    # Başın dönmesini taklit: görüntüyü yatayda sıkıştır (yüz daralır, bıyık görüntüsü değişir)
+    # + yanağa yakın bir el
+    img = cv2.imread(os.path.join(IN, "neg_03_parmak_yanakta.jpg"))
+    h, w = img.shape[:2]
+    stretched = cv2.resize(img[:, : int(w * 0.85)], (w, h))
+    r = det.process(stretched)
+    det.close()
+    assert r.state not in (STATE_TOUCH, STATE_PULL), r.state
+
+
+def test_zone_covers_full_mustache():
+    """Bıyık bölgesi, demo yüze çizilen bıyığın tamamını (koyu pikseller) kapsamalı."""
+    face_px, g = _portrait_geom()
+    img = cv2.imread(os.path.join(IN, "neg_01_el_yok.jpg"))
+    # bıyık pikselleri: burun altı ile dudak arasındaki çok koyu pikseller
+    x0, x1 = int(face_px[61][0] - 20), int(face_px[291][0] + 20)
+    y0, y1 = int(face_px[2][1]), int(face_px[13][1])
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.where(gray[y0:y1, x0:x1] < 50)
+    contour = g.zone.reshape(-1, 1, 2)
+    inside = [cv2.pointPolygonTest(contour, (float(x + x0), float(y + y0)), True) >= -g.fw * 0.02
+              for x, y in zip(xs, ys)]
+    assert len(inside) > 50
+    assert np.mean(inside) >= 0.95, np.mean(inside)

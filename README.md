@@ -51,7 +51,12 @@ girişiminde bulunduğunuzda** sizi anında durduran bir Windows uygulaması.
   🟩 yeşil = güvenli, 🟨 sarı = el yaklaşıyor, 🟥 kırmızı = temas, 🟪 mor = yolma hareketi.
 * **Duraklat** düğmesi veya **Ctrl+Shift+P**: yemek yerken / yüzünüzü yıkarken geçici olarak durdurun.
 * **Alarmı test et**: sesi ve ekranı 3 saniye dener.
-* **Hassasiyet**: büyütürseniz bıyık çevresinde daha geniş bir alan izlenir (daha erken uyarır).
+* **Bıyık bölgesi büyüklüğü**: bıyığınız gürse ve çokgen bıyığın tamamını kapsamıyorsa büyütün
+  (varsayılan 1.25). Çok büyütmek yanağa dokunuşlarda da alarm verebilir.
+* **Hassasiyet**: bölgenin çevresindeki tolerans. Büyütürseniz daha erken uyarır ama yanlış alarm
+  artar; önce *bölge büyüklüğünü* ayarlayın, hassasiyeti 0.05-0.10 arasında tutun.
+* Önizlemede **gri çizgili el** görürseniz: model yüzünüzün bir kısmını (yanak, kulak) el sanmış,
+  program bunu **sahte el** olarak tanıyıp yok saymış demektir; alarm vermez.
 * **Alarm gecikmesi**: parmağın bıyıkta ne kadar kalınca alarm çalacağı. 0 yaparsanız anında çalar.
 * Önizlemeyi kapatmak işlemciyi biraz rahatlatır; koruma arka planda çalışmaya devam eder.
 
@@ -62,6 +67,7 @@ Program ilk açılışta yanına `ayarlar.json` oluşturur. Arayüzde olmayan ay
 | Ayar | Açıklama | Varsayılan |
 |---|---|---|
 | `kamera_no` | Birden fazla kamera varsa 1, 2… deneyin (harici USB kamera genelde 1) | 0 |
+| `biyik_bolgesi` | Bıyık bölgesinin büyüklüğü (arayüzde de var) | 1.25 |
 | `yolma_bekleme_sn` | Çimdik/yolma hareketinde alarm gecikmesi | 0.1 |
 | `birakma_sn` | El bu kadar süre uzak kalınca alarm kapanır | 1.5 |
 | `ust_seviye_sn` | Alarm bu kadar sürerse ekran kapatılır / kilitlenir | 5.0 |
@@ -78,6 +84,11 @@ Program ilk açılışta yanına `ayarlar.json` oluşturur. Arayüzde olmayan ay
   * *Hand Landmarker* → her elde 21 nokta. Başparmak/işaret/orta parmak uçları bıyık bölgesine
     girerse **TEMAS**, başparmak ile işaret parmağı birbirine yakın ve bıyıktaysa **YOLMA**.
   * Yüze yakın elleri kaçırmamak için yüz çevresine yakınlaştırılmış ikinci bir el taraması yapılır.
+* **Sahte el elemesi:** Model bazen yanağı, kulağı veya burnu küçük bir el sanabiliyor (özellikle baş
+  yana dönükken). Yüzün üzerinde duran ama avucu yüze göre çok küçük olan, ya da bileği yüzün içinde
+  ve dudağın üstünde kalan "eller" yok sayılır. Gerçek bir elin bileği çenenin altında veya yüzün yanındadır.
+* **Baş açısı:** Baş belirgin şekilde yana dönükken görüntü değişimine dayalı yedek kontrol kapatılır;
+  bıyığın elsiz görüntüsü her baş açısı için ayrı öğrenilir.
 * **Yedek kontrol (örtülme):** Parmak ucu kameradan görünmese bile, el bıyığın yanındayken
   bıyık bölgesinin görüntüsü normalden belirgin şekilde değişirse temas sayılır. El yüzü kapatıp
   yüz kaybolursa son bilinen bıyık konumu 3 saniye hatırlanır.
@@ -95,6 +106,8 @@ yerleştirilerek 17 demo görüntü üretildi (`demo/girdiler`), sonuçlar `demo
   Kaçırılan tek görüntüde (iki parmak/zafer işareti) yapıştırılan el modele hiç el olarak görünmedi.
 * Alarm zamanlaması (kısa dokunuşta alarm yok, süren temasta alarm, el çekilince kapanma, üst seviye)
   ve video akışı testleri geçti.
+* Kullanıcı geri bildirimi testleri (v1.1): yanakta ve kulakta hayali el → alarm yok; baş yana
+  dönükken → alarm yok; bıyık bölgesi çizilen bıyığın %99'unu kapsıyor (eskisi %92).
 
 ```bash
 python tests/make_demo_images.py   # demo görüntüleri üret

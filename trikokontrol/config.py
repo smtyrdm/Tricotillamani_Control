@@ -3,11 +3,15 @@ import os
 
 from .paths import user_dir
 
+AYAR_SURUMU = 2
+
 DEFAULTS = {
+    "ayar_surumu": AYAR_SURUMU,
     "kamera_no": 0,                 # birden fazla kamera varsa 1, 2 ... deneyin
     "kamera_genislik": 640,
     "kamera_yukseklik": 480,
     "hassasiyet": 0.07,             # bıyık bölgesi toleransı (yüz genişliği oranı). Büyük = daha hassas
+    "biyik_bolgesi": 1.25,          # bıyık bölgesinin büyüklüğü (1.0 = sadece burun altı-dudak arası)
     "temas_bekleme_sn": 0.4,        # parmak bu kadar süre bıyıkta kalırsa alarm
     "yolma_bekleme_sn": 0.1,        # çimdik (yolma) hareketinde alarm gecikmesi
     "birakma_sn": 1.5,              # el bu kadar süre uzak kalınca alarm kapanır
@@ -28,12 +32,21 @@ CONFIG_PATH = os.path.join(user_dir(), "ayarlar.json")
 
 def load() -> dict:
     cfg = dict(DEFAULTS)
+    saved = {}
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
-                cfg.update(json.load(f))
+                saved = json.load(f)
+            cfg.update(saved)
         except Exception as e:
             print("ayarlar.json okunamadı, varsayılanlar kullanılıyor:", e)
+    if saved and saved.get("ayar_surumu", 1) < 2:
+        # Sürüm 2: bıyık bölgesi büyütüldü. Eski sürümde küçük bölgeyi telafi etmek için
+        # hassasiyet çok yükseltildiyse (yanlış alarmların bir sebebi) varsayılana dön.
+        if cfg.get("hassasiyet", 0) > 0.12:
+            cfg["hassasiyet"] = DEFAULTS["hassasiyet"]
+        cfg["ayar_surumu"] = AYAR_SURUMU
+    cfg["hassasiyet"] = min(float(cfg["hassasiyet"]), 0.15)
     return cfg
 
 

@@ -73,11 +73,15 @@ class Worker(threading.Thread):
         if hasattr(self, "det"):
             self.det.margin = cfg["hassasiyet"]
             self.det.occlusion_check = cfg["ortu_algilama"]
+            self.det.zone_scale_x = cfg["biyik_bolgesi"]
+            self.det.zone_scale_y = cfg["biyik_bolgesi"] * 1.16
 
     def run(self):
         try:
             self.det = MustacheDetector(video_mode=True, margin=self.cfg["hassasiyet"],
-                                        occlusion_check=self.cfg["ortu_algilama"])
+                                        occlusion_check=self.cfg["ortu_algilama"],
+                                        zone_scale_x=self.cfg["biyik_bolgesi"],
+                                        zone_scale_y=self.cfg["biyik_bolgesi"] * 1.16)
         except Exception as e:
             self.error = f"Yapay zekâ modelleri yüklenemedi:\n{e}"
             return
@@ -222,9 +226,13 @@ class App:
             ttk.Checkbutton(side, text=label, variable=v, command=self._cfg_changed).pack(anchor="w")
             self.vars[key] = v
 
-        ttk.Label(side, text="Hassasiyet (bıyık çevresi toleransı)").pack(anchor="w", pady=(10, 0))
+        ttk.Label(side, text="Bıyık bölgesi büyüklüğü").pack(anchor="w", pady=(10, 0))
+        self.zone = tk.DoubleVar(value=self.cfg["biyik_bolgesi"])
+        ttk.Scale(side, from_=1.0, to=1.8, variable=self.zone,
+                  command=lambda _=None: self._cfg_changed()).pack(fill="x")
+        ttk.Label(side, text="Hassasiyet (bölge çevresi toleransı)").pack(anchor="w", pady=(6, 0))
         self.sens = tk.DoubleVar(value=self.cfg["hassasiyet"])
-        ttk.Scale(side, from_=0.02, to=0.20, variable=self.sens,
+        ttk.Scale(side, from_=0.02, to=0.15, variable=self.sens,
                   command=lambda _=None: self._cfg_changed()).pack(fill="x")
         ttk.Label(side, text="Alarm gecikmesi (sn)").pack(anchor="w", pady=(6, 0))
         self.hold = tk.DoubleVar(value=self.cfg["temas_bekleme_sn"])
@@ -250,8 +258,10 @@ class App:
         for k, v in self.vars.items():
             self.cfg[k] = bool(v.get())
         self.cfg["hassasiyet"] = round(float(self.sens.get()), 3)
+        self.cfg["biyik_bolgesi"] = round(float(self.zone.get()), 2)
         self.cfg["temas_bekleme_sn"] = round(float(self.hold.get()), 2)
-        self.hold_lbl.configure(text=f"{self.cfg['temas_bekleme_sn']:.1f} sn  |  hassasiyet {self.cfg['hassasiyet']:.2f}")
+        self.hold_lbl.configure(text=f"gecikme {self.cfg['temas_bekleme_sn']:.1f} sn | bölge x{self.cfg['biyik_bolgesi']:.2f}"
+                                     f" | hassasiyet {self.cfg['hassasiyet']:.2f}")
         if hasattr(self, "worker"):
             self.worker.apply_cfg(self.cfg)
         if not self.cfg["onizleme"]:
