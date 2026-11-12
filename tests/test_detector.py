@@ -233,3 +233,80 @@ def test_zone_covers_full_mustache():
               for x, y in zip(xs, ys)]
     assert len(inside) > 50
     assert np.mean(inside) >= 0.95, np.mean(inside)
+
+
+# ---------------------------------------------------------------- v1.2: yüze dışarıdan giriş
+def _run_video(frames, hold=0.4):
+    det = MustacheDetector(video_mode=True)
+    alarm = AlarmLogic(touch_hold_s=hold, pull_hold_s=0.15, release_s=1.0)
+    t, out = 0.0, []
+    for fr in frames:
+        r = det.process(fr, now=t)
+        out.append((r.state, alarm.update(r.state, t), len(r.rejected_hands)))
+        t += 1 / 15
+    det.close()
+    return out
+
+
+def test_fist_entering_from_below_alarms():
+    """Yumruk kadrajın altından yükselip bıyığa gelirse (gerçek el davranışı) alarm çalmalı."""
+    seq_dir = os.path.join(IN, "dizi")
+    if not glob.glob(os.path.join(seq_dir, "*.jpg")):
+        from tests import make_demo_images
+        make_demo_images.main()
+    clean = cv2.imread(os.path.join(IN, "neg_01_el_yok.jpg"))
+    seq = [cv2.imread(f) for f in sorted(glob.glob(os.path.join(seq_dir, "*.jpg")))]
+    frames = [clean] * 8 + [f for f in seq for _ in range(2)] + [seq[-1]] * 15
+    out = _run_video(frames)
+    assert any(a == "alarm" for _, a, _ in out), [s for s, _, _ in out]
+
+
+def test_hand_tracks_entry_rule():
+    """
+    Yüzün içinde 'beliren' ve hep orada kalan el (yüz şekillerinden uydurulan sahte el)
+    asla güvenilir sayılmaz; yüzün dışından gelip içeri giren el güvenilir sayılır.
+    """
+    from trikokontrol.detector import HandTracks
+    face_px, g = _portrait_geom()
+    fw = g.fw
+    lip = face_px[0]
+    inside = _fake_hand(lip + [fw * 0.05, fw * 0.15], lip, fw * 0.4)      # bilek yüzün içinde
+    outside = _fake_hand(lip + [0, fw * 1.2], lip + [0, fw * 0.4], fw * 0.5)  # bilek çenenin altında
+    tr = HandTracks()
+    t = 0.0
+    for _ in range(60):  # 4 sn boyunca yüzün içinde duran sahte el
+        assert tr.update([inside], g, t) == [False]
+        t += 1 / 15
+    tr.reset()
+    # gerçek el: aşağıdan yükselip bıyığa gelir, bileği sonunda yüzün içine girer
+    for k in np.linspace(0, 1, 10):
+        hand = outside + (inside - outside) * k
+        res = tr.update([hand], g, t)
+        t += 1 / 15
+    assert res == [True]
+    # el 1 sn kaybolursa güven sıfırlanır; yüzün içinde yeniden beliren el güvenilmez
+    t += 1.0
+    assert tr.update([inside], g, t) == [False]
+
+
+def test_thin_v_phantom_shape_rejected():
+    """Ekran görüntüsündeki sahte el: gözlük sapından ağız kenarına inen ince 'V' iskelet."""
+    from trikokontrol.detector import hand_shape_ok
+    face_px, g = _portrait_geom()
+    fw = g.fw
+    wrist = face_px[61] + np.array([0, -fw * 0.02], np.float32)       # ağız kenarı
+    top = face_px[127] + np.array([fw * 0.05, -fw * 0.1], np.float32)  # gözlük sapı / şakak
+    h = np.zeros((21, 2), np.float32)
+    for i in range(21):  # tüm noktalar bilekten şakağa giden ince iki çizgi üzerinde
+        k = (i % 5 + 1) / 5
+        side = np.array([fw * 0.03 * (1 if i % 2 else -1), 0], np.float32)
+        h[i] = wrist + (top - wrist) * k + side * k
+    h[0] = wrist
+    assert not hand_shape_ok(h)
+    # gerçek el iskeletleri (demo görüntülerdeki) şekil kontrolünden geçmeli
+    det = MustacheDetector(video_mode=False)
+    for f in ["poz_01_isaret_parmagi_biyik_sol.jpg", "poz_04_yumruk_cimdik_biyik.jpg",
+              "poz_05_basparmak_biyik.jpg"]:
+        r = det.process(cv2.imread(os.path.join(IN, f)))
+        assert r.hand_points and all(hand_shape_ok(hp) for hp in r.hand_points), f
+    det.close()

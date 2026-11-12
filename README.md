@@ -87,6 +87,10 @@ Program ilk açılışta yanına `ayarlar.json` oluşturur. Arayüzde olmayan ay
 * **Sahte el elemesi:** Model bazen yanağı, kulağı veya burnu küçük bir el sanabiliyor (özellikle baş
   yana dönükken). Yüzün üzerinde duran ama avucu yüze göre çok küçük olan, ya da bileği yüzün içinde
   ve dudağın üstünde kalan "eller" yok sayılır. Gerçek bir elin bileği çenenin altında veya yüzün yanındadır.
+* **Yüze dışarıdan giriş kuralı (v1.2):** Her el kareden kareye takip edilir. Gerçek bir el yüze
+  dışarıdan gelir (bileği önce yüzün yanında ya da çenenin altında görünür). Bileği yüzün içinde
+  olan bir el, ancak yüze dışarıdan girmişse kabul edilir; yüzün içinde birden "beliren" el yok sayılır.
+  Ayrıca parmakları tek çizgiye çökmüş ince "V" şeklindeki iskeletler (gözlük sapı, sakal kenarı) elenir.
 * **Baş açısı:** Baş belirgin şekilde yana dönükken görüntü değişimine dayalı yedek kontrol kapatılır;
   bıyığın elsiz görüntüsü her baş açısı için ayrı öğrenilir.
 * **Yedek kontrol (örtülme):** Parmak ucu kameradan görünmese bile, el bıyığın yanındayken
@@ -108,6 +112,8 @@ yerleştirilerek 17 demo görüntü üretildi (`demo/girdiler`), sonuçlar `demo
   ve video akışı testleri geçti.
 * Kullanıcı geri bildirimi testleri (v1.1): yanakta ve kulakta hayali el → alarm yok; baş yana
   dönükken → alarm yok; bıyık bölgesi çizilen bıyığın %99'unu kapsıyor (eskisi %92).
+* v1.2 testleri: gözlük sapından ağız kenarına inen ince "V" sahte el → elenir; yüzün içinde 4 sn
+  duran sahte el → hiç kabul edilmez; aşağıdan yükselip bıyığa gelen yumruk → alarm.
 
 ```bash
 python tests/make_demo_images.py   # demo görüntüleri üret

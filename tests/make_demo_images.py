@@ -166,6 +166,17 @@ def main():
     for fn, im in scenarios.items():
         cv2.imwrite(os.path.join(OUT, fn), im)
         print("yazildi:", fn)
+
+    # Hareket dizisi: yumruk aşağıdan (kadraj dışından) yükselip bıyığa gelir.
+    seq_dir = os.path.join(OUT, "dizi")
+    os.makedirs(seq_dir, exist_ok=True)
+    start = np.array([mus_l[0] - fw * 0.1, H * 1.05])
+    for i in range(10):
+        k = min(1.0, i / 6)
+        dst = start + (np.array(mus_l) - start) * k
+        im = put("fist", 4, dst, -20, pts_override=thumb_index_mid("fist"))
+        cv2.imwrite(os.path.join(seq_dir, f"yumruk_yaklasma_{i:02d}.jpg"), im)
+    print("yazildi: dizi/yumruk_yaklasma_*.jpg")
     det.close()
 
 

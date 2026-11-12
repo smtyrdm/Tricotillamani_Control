@@ -142,16 +142,39 @@ def face_geometry(face_px: np.ndarray, scale_x: float, scale_y: float) -> FaceGe
                     yaw_ratio=yaw_ratio)
 
 
-def hand_is_plausible(hand: np.ndarray, g: FaceGeom, min_palm: float = 0.28) -> bool:
+def hand_shape_ok(hand: np.ndarray) -> bool:
     """
-    Sahte el elemesi. Model bazen yanak, kulak veya burnu küçük bir el sanar.
+    El iskeletinin şekli gerçekçi mi? Yüzdeki çizgilerden (gözlük sapı, sakal kenarı) uydurulan
+    sahte ellerde parmaklar tek bir çizgiye çöker ve iskelet ince bir 'V' olur.
+    Gerçek elde (yumruk, açık el, yandan görünüş) avuç genişliği ve kapladığı alan belirgindir.
+    """
+    L = float(np.linalg.norm(hand[0] - hand[9]))
+    if L < 1:
+        return False
+    width = float(np.linalg.norm(hand[5] - hand[17])) / L
+    area = cv2.contourArea(cv2.convexHull(hand.astype(np.float32))) / (L * L)
+    return width >= 0.30 and area >= 0.40
+
+
+def wrist_outside_face(hand: np.ndarray, g: FaceGeom) -> bool:
+    """Bilek yüzün dışında mı (yüzün yanında ya da çenenin altında)?"""
+    w = hand[0]
+    return cv2.pointPolygonTest(g.oval_big.reshape(-1, 1, 2), (float(w[0]), float(w[1])), False) <= 0
+
+
+def hand_is_plausible(hand: np.ndarray, g: FaceGeom, min_palm: float = 0.22) -> bool:
+    """
+    Tek kareye bakarak sahte el elemesi. Model bazen yanak, kulak, burun, gözlük sapını el sanar.
+      - Şekil: parmakları tek çizgiye çökmüş ince 'V' iskeletler sahtedir.
       - Yüzün/kulağın üzerinde duran gerçek bir elin avucu (bilek -> orta parmak kökü)
         yüz genişliğinin en az ~%30'u kadardır. Yüz üstünde bundan küçük "el" sahtedir.
-      - Bileği yüzün İÇİNDE ve üst dudaktan YUKARIDA olan bir el gerçekçi değildir
-        (bıyığa uzanan elin bileği çenenin altında veya yüzün yanında olur).
+      - Bileği yüzün İÇİNDE ve üst dudak hizasında ya da yukarısında olan bir el gerçekçi
+        değildir (bıyığa uzanan elin bileği çenenin altında veya yüzün yanında olur).
     """
+    if not hand_shape_ok(hand):
+        return False
     palm = float(np.linalg.norm(hand[0] - hand[9])) / g.fw
-    if g.yaw > 0.6:  # baş belirgin şekilde yana dönükken daha sıkı ol
+    if g.yaw > 0.5:  # baş belirgin şekilde yana dönükken daha sıkı ol
         min_palm *= 1.25
     if palm > 3.0:
         return False
@@ -162,10 +185,51 @@ def hand_is_plausible(hand: np.ndarray, g: FaceGeom, min_palm: float = 0.28) -> 
         return False
     wrist = hand[0]
     inside = cv2.pointPolygonTest(g.oval.reshape(-1, 1, 2), (float(wrist[0]), float(wrist[1])), False) > 0
-    above_lip = float(np.dot(wrist - g.lip, g.up)) > 0.05 * g.fw
-    if inside and above_lip:
+    near_or_above_lip = float(np.dot(wrist - g.lip, g.up)) > -0.10 * g.fw
+    if inside and near_or_above_lip:
         return False
     return True
+
+
+class HandTracks:
+    """
+    Elleri kareden kareye takip eder. Gerçek bir el yüze DIŞARIDAN gelir (bileği önce yüzün
+    yanında/çenenin altında görünür); yüzdeki şekillerden uydurulan sahte el ise yüzün içinde
+    birden belirir. Bileği yüzün içinde olan bir el, ancak daha önce yüzün dışından girdiyse
+    ("güvenilir iz") kabul edilir.
+    """
+
+    def __init__(self, max_gap_s: float = 0.7, match_dist: float = 0.6):
+        self.tracks = []  # her biri: {"w": bilek, "trusted": bool, "t": son görülme}
+        self.max_gap_s = max_gap_s
+        self.match_dist = match_dist
+
+    def reset(self):
+        self.tracks = []
+
+    def update(self, hands: List[np.ndarray], g: FaceGeom, now: float) -> List[bool]:
+        self.tracks = [t for t in self.tracks if now - t["t"] <= self.max_gap_s]
+        used = set()
+        trusted = []
+        for hp in hands:
+            w = hp[0]
+            best, bi = None, -1
+            for i, t in enumerate(self.tracks):
+                if i in used:
+                    continue
+                d = float(np.linalg.norm(t["w"] - w)) / g.fw
+                if d <= self.match_dist and (best is None or d < best):
+                    best, bi = d, i
+            outside = wrist_outside_face(hp, g)
+            if bi < 0:
+                self.tracks.append({"w": w.copy(), "trusted": outside, "t": now})
+                bi = len(self.tracks) - 1
+            tr = self.tracks[bi]
+            tr["w"], tr["t"] = w.copy(), now
+            tr["trusted"] = tr["trusted"] or outside
+            used.add(bi)
+            trusted.append(tr["trusted"])
+        return trusted
 
 
 def classify(zone: np.ndarray, face_width: float, hands_px: List[np.ndarray],
@@ -212,7 +276,8 @@ class MustacheDetector:
                  margin: float = 0.07, near_margin: float = 0.25, pinch_ratio: float = 0.22,
                  crop_scale: float = 2.4, occlusion_check: bool = True,
                  occlusion_threshold: float = 0.40, zone_scale_x: float = 1.25,
-                 zone_scale_y: float = 1.45, min_palm: float = 0.28):
+                 zone_scale_y: float = 1.45, min_palm: float = 0.22,
+                 require_entry: Optional[bool] = None):
         import mediapipe as mp
         from mediapipe.tasks.python import BaseOptions, vision
 
@@ -245,6 +310,9 @@ class MustacheDetector:
         self.zone_scale_x = zone_scale_x
         self.zone_scale_y = zone_scale_y
         self.min_palm = min_palm
+        # Video modunda: bileği yüzün içindeki el, ancak yüze dışarıdan girdiyse kabul edilir.
+        self.require_entry = video_mode if require_entry is None else require_entry
+        self.tracks = HandTracks()
         self.occlusion_check = occlusion_check
         self.occlusion_threshold = occlusion_threshold
         self._baselines = {}  # baş açısına göre (yaw dilimi) elsiz bıyık görüntüleri
@@ -296,9 +364,14 @@ class MustacheDetector:
             hands += self._crop_hands(rgb, geom.zone, geom.fw, hands)
         if geom is not None:
             res.zone, res.face_width, res.yaw = geom.zone, geom.fw, geom.yaw
-            for hp in hands:
-                (res.hand_points if hand_is_plausible(hp, geom, self.min_palm)
-                 else res.rejected_hands).append(hp)
+            plausible = [hp for hp in hands if hand_is_plausible(hp, geom, self.min_palm)]
+            res.rejected_hands = [hp for hp in hands if not any(hp is q for q in plausible)]
+            if self.require_entry:
+                trust = self.tracks.update(plausible, geom, now)
+                for hp, ok in zip(plausible, trust):
+                    (res.hand_points if ok else res.rejected_hands).append(hp)
+            else:
+                res.hand_points = plausible
         else:
             res.hand_points = hands
         res.hands = len(res.hand_points)
